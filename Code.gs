@@ -60,8 +60,12 @@ const DEBUG = false;
 
 function debugLog(message) {
   if (DEBUG) {
-    Logger.log(message);
+    Logger.log('D: ' + message);
   }
+}
+
+function logError(message) {
+  Logger.log('E: ' + message);
 }
 
 function main() {
@@ -99,7 +103,7 @@ function main() {
     try {
       processSingleFile(file, name, targetSheet, lastTargetRowValues);
     } catch (e) {
-      Logger.log('Import error for ' + name + ': ' + e);
+      logError('Import error for ' + name + ': ' + e);
     }
   }
 }
@@ -165,79 +169,90 @@ function getLastTargetRowValues(sheet) {
 
 function processSingleFile(file, name, targetSheet, lastTargetRowValues) {
   const resource = { title: name, mimeType: 'application/vnd.google-apps.spreadsheet' };
-  const converted = Drive.Files.create(resource, file.getBlob(), { convert: true });
+  let converted = null;
 
-  const tempSs = SpreadsheetApp.openById(converted.id);
-  const targetTimeZone = targetSheet.getParent().getSpreadsheetTimeZone();
-  if (typeof tempSs.setSpreadsheetTimeZone === 'function') {
-    tempSs.setSpreadsheetTimeZone(targetTimeZone);
-    debugLog('Converted sheet timezone set to ' + targetTimeZone);
-  }
+  try {
+    converted = Drive.Files.create(resource, file.getBlob(), { convert: true });
 
-  const srcSheet = tempSs.getSheets()[0];
-  const data = srcSheet.getDataRange().getValues();
-
-  let matchIndex = -1;
-  let firstColType = null;
-  for (let i = data.length - 1; i >= 0; i--) {
-    const row = data[i];
-    if (!row || !row.length) continue;
-
-    if (firstColType === null) {
-      firstColType = getValueType(row[0]);
-      debugLog('First non-empty source row type is ' + firstColType + ' for file ' + name);
+    const tempSs = SpreadsheetApp.openById(converted.id);
+    const targetTimeZone = targetSheet.getParent().getSpreadsheetTimeZone();
+    if (typeof tempSs.setSpreadsheetTimeZone === 'function') {
+      tempSs.setSpreadsheetTimeZone(targetTimeZone);
+      debugLog('Converted sheet timezone set to ' + targetTimeZone);
     }
 
-    if (lastTargetRowValues && rowsEqual(lastTargetRowValues, row)) {
-      matchIndex = i;
-      break;
+    const srcSheet = tempSs.getSheets()[0];
+    const data = srcSheet.getDataRange().getValues();
+
+    let matchIndex = -1;
+    let firstColType = null;
+    for (let i = data.length - 1; i >= 0; i--) {
+      const row = data[i];
+      if (!row || !row.length) continue;
+
+      if (firstColType === null) {
+        firstColType = getValueType(row[0]);
+        debugLog('First non-empty source row type is ' + firstColType + ' for file ' + name);
+      }
+
+      if (lastTargetRowValues && rowsEqual(lastTargetRowValues, row)) {
+        matchIndex = i;
+        break;
+      }
     }
-  }
 
-  if (lastTargetRowValues && matchIndex === -1) {
-    throw new Error('Potential hole in data: no exact match for existing last row');
-  }
+    if (lastTargetRowValues && matchIndex === -1) {
+      throw new Error('Potential hole in data: no exact match for existing last row');
+    }
 
-  const rowsToImport = [];
-  let startIndex = matchIndex >= 0 ? matchIndex - 1 : data.length - 1;
+    const rowsToImport = [];
+    let startIndex = matchIndex >= 0 ? matchIndex - 1 : data.length - 1;
 
-  for (let i = startIndex; i >= 0; i--) {
-    const row = data[i];
-    if (!row || !row.length) continue;
+    for (let i = startIndex; i >= 0; i--) {
+      const row = data[i];
+      if (!row || !row.length) continue;
 
-    const currentType = getValueType(row[0]);
-    if (firstColType === null) {
-      firstColType = currentType;
+      const currentType = getValueType(row[0]);
+      if (firstColType === null) {
+        firstColType = currentType;
+        rowsToImport.push(row);
+        continue;
+      }
+
+      if (currentType !== firstColType) {
+        debugLog('Skipping row ' + (i + 1) + ' from ' + name + ': first column type "' + currentType + '" does not match "' + firstColType + '"');
+        debugLog('Row values: ' + JSON.stringify(row));
+        continue;
+      }
+
       rowsToImport.push(row);
-      continue;
     }
 
-    if (currentType !== firstColType) {
-      debugLog('Skipping row ' + (i + 1) + ' from ' + name + ': first column type "' + currentType + '" does not match "' + firstColType + '"');
-      debugLog('Row values: ' + JSON.stringify(row));
-      continue;
+    if (rowsToImport.length) {
+      const startRow = targetSheet.getLastRow() + 1 || 1;
+      targetSheet.getRange(startRow, 1, rowsToImport.length, rowsToImport[0].length).setValues(rowsToImport);
+      debugLog('Imported ' + rowsToImport.length + ' rows from ' + name);
+    } else {
+      debugLog('No rows to import from ' + name);
     }
 
-    rowsToImport.push(row);
-  }
-
-  if (rowsToImport.length) {
-    const startRow = targetSheet.getLastRow() + 1 || 1;
-    targetSheet.getRange(startRow, 1, rowsToImport.length, rowsToImport[0].length).setValues(rowsToImport);
-    debugLog('Imported ' + rowsToImport.length + ' rows from ' + name);
-  } else {
-    debugLog('No rows to import from ' + name);
-  }
-
-  Drive.Files.remove(converted.id); // remove temp converted file
-
-  if (PROCESSED_FOLDER_ID) {
-    try {
-      // pass null for mediaData so the API treats the 4th arg as optionalArgs
-      Drive.Files.update({}, file.getId(), null, { addParents: PROCESSED_FOLDER_ID, removeParents: FOLDER_ID });
-      debugLog('Moved ' + name + ' to processed folder');
-    } catch (e) {
-      debugLog('Failed to move ' + name + ' to processed folder: ' + (e && e.message ? e.message : e));
+    if (PROCESSED_FOLDER_ID) {
+      try {
+        // pass null for mediaData so the API treats the 4th arg as optionalArgs
+        Drive.Files.update({}, file.getId(), null, { addParents: PROCESSED_FOLDER_ID, removeParents: FOLDER_ID });
+        debugLog('Moved ' + name + ' to processed folder');
+      } catch (e) {
+        logError('Failed to move ' + name + ' to processed folder: ' + (e && e.message ? e.message : e));
+      }
+    }
+  } finally {
+    if (converted && converted.id) {
+      try {
+        Drive.Files.remove(converted.id);
+        debugLog('Removed temporary converted file for ' + name);
+      } catch (e) {
+        logError('Failed to remove temporary converted file for ' + name + ': ' + (e && e.message ? e.message : e));
+      }
     }
   }
 }
