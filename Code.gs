@@ -1,5 +1,5 @@
 /**
- * gas-incremental-excel-import
+ * gas-incremental-excel-import (https://github.com/yrtimiD/gas-incremental-excel-import)
  *
  * Purpose
  * - Convert Excel files placed in a Drive folder to Google Sheets and
@@ -51,58 +51,106 @@
  * - Set `DEBUG = true` to enable `Logger.log` debug output.
  */
 
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('⚡ Quick Scripts')
+    .addItem('Run Import from Drive', 'runImportFromDrive')
+    .addToUi();
+}
 
-function debugLog(message) {
+function isContainerBound_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  return ss !== null;
+}
+
+let messages = [];
+
+function logDebug_(message) {
   if (DEBUG) {
-    Logger.log('D: ' + message);
-  }
-}
-
-function logError(message) {
-  Logger.log('E: ' + message);
-}
-
-function main() {
-  const folder = DriveApp.getFolderById(FOLDER_ID);
-  const files = folder.getFiles();
-  const targetSs = SpreadsheetApp.openById(TARGET_SHEET_ID);
-  const targetSheet = targetSs.getSheetByName(TARGET_SHEET_NAME) || targetSs.getSheets()[0];
-  const fileEntries = [];
-
-  while (files.hasNext()) {
-    const file = files.next();
-    const name = file.getName();
-    const fileDate = parseDateFromFilename(name);
-    fileEntries.push({ file, name, fileDate });
-  }
-
-  fileEntries.sort((a, b) => {
-    if (!a.fileDate && !b.fileDate) return 0;
-    if (!a.fileDate) return 1;
-    if (!b.fileDate) return -1;
-    return a.fileDate - b.fileDate;
-  });
-
-  for (const entry of fileEntries) {
-    const { file, name, fileDate: entryFileDate } = entry;
-    debugLog('Checking file: ' + name);
-
-    if (!entryFileDate) {
-      debugLog('Skipping ' + name + ': no parseable date in filename');
-      continue;
-    }
-
-    const lastTargetRowValues = getLastTargetRowValues(targetSheet);
-
-    try {
-      processSingleFile(file, name, targetSheet, lastTargetRowValues);
-    } catch (e) {
-      logError('Import error for ' + name + ': ' + e);
+    if (isContainerBound_()) {
+      messages.push(message);
+    } else {
+      Logger.log('D: ' + message);
     }
   }
 }
 
-function getLastDateInSheet(sheet) {
+function logInfo_(message) {
+  if (isContainerBound_()) {
+    messages.push(message);
+  } else {
+    Logger.log('I: ' + message);
+  }
+}
+
+function logError_(message) {
+  if (isContainerBound_()) {
+    messages.push(message);
+  } else {
+    Logger.log('E: ' + message);
+  }
+}
+
+function logFlush_() {
+  if (isContainerBound_()) {
+    const ui = SpreadsheetApp.getUi();
+    ui.alert(messages.join('\n'));
+    messages = [];
+  }
+}
+
+function runImportFromDrive() {
+  let lock;
+
+  try {
+    lock = LockService.getDocumentLock();
+    const success = lock.tryLock(0);
+    if (!success) {
+      logError_('Script is already running. Exiting.');
+      logFlush_();
+      return;
+    }
+
+    const folder = DriveApp.getFolderById(FOLDER_ID);
+    const files = folder.getFiles();
+    const targetSs = isContainerBound_() ? SpreadsheetApp.getActiveSpreadsheet() : SpreadsheetApp.openById(TARGET_SHEET_ID);
+    const targetSheet = targetSs.getSheetByName(TARGET_SHEET_NAME);
+    if (!targetSheet) {
+      logError_(`Can't open sheet named "${TARGET_SHEET_NAME}"`);
+      logFlush_();
+      return;
+    }
+
+    const fileEntries = [];
+    let importedRows = 0;
+
+    while (files.hasNext()) {
+      const file = files.next();
+      const name = file.getName();
+      fileEntries.push({ file, name });
+    }
+    fileEntries.sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of fileEntries) {
+      const { file, name } = entry;
+      const lastTargetRowValues = getLastTargetRowValues_(targetSheet);
+
+      try {
+        importedRows += processSingleFile_(file, name, targetSheet, lastTargetRowValues);
+      } catch (e) {
+        logError_('Import error for ' + name + ': ' + e);
+      }
+    }
+    logInfo_(`Imported ${importedRows} rows from ${fileEntries.length} files.`);
+  } catch (e) {
+    logError_('Import error: ' + e.message);
+  } finally {
+    if (lock) lock.releaseLock();
+    logFlush_();
+  }
+}
+
+function getLastDateInSheet_(sheet) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 1) return new Date(0);
   const val = sheet.getRange(lastRow, 1).getValue();
@@ -112,7 +160,7 @@ function getLastDateInSheet(sheet) {
   return new Date(0);
 }
 
-function parseDateValue(value) {
+function parseDateValue_(value) {
   if (value instanceof Date) {
     return new Date(value.getFullYear(), value.getMonth(), value.getDate());
   }
@@ -143,25 +191,27 @@ function parseDateValue(value) {
   return null;
 }
 
-function parseDateFromFilename(name) {
+function parseDateFromFilename_(name) {
   // Try patterns: YYYY-MM-DD or YYYYMMDD or similar numeric forms
-  return parseDateValue(name);
+  return parseDateValue_(name);
 }
 
-function getValueType(value) {
+function getValueType_(value) {
   if (value instanceof Date) return 'date';
   if (value === null || value === undefined) return 'null';
   return typeof value;
 }
 
-function getLastTargetRowValues(sheet) {
+function getLastTargetRowValues_(sheet) {
   const lastRow = sheet.getLastRow();
   return lastRow > 0
     ? sheet.getRange(lastRow, 1, 1, sheet.getLastColumn()).getValues()[0]
     : null;
 }
 
-function processSingleFile(file, name, targetSheet, lastTargetRowValues) {
+function processSingleFile_(file, name, targetSheet, lastTargetRowValues) {
+  logDebug_('Processing file: ' + name);
+
   const resource = { title: name, mimeType: 'application/vnd.google-apps.spreadsheet' };
   let converted = null;
 
@@ -172,7 +222,7 @@ function processSingleFile(file, name, targetSheet, lastTargetRowValues) {
     const targetTimeZone = targetSheet.getParent().getSpreadsheetTimeZone();
     if (typeof tempSs.setSpreadsheetTimeZone === 'function') {
       tempSs.setSpreadsheetTimeZone(targetTimeZone);
-      debugLog('Converted sheet timezone set to ' + targetTimeZone);
+      logDebug_('Converted sheet timezone set to ' + targetTimeZone);
     }
 
     const srcSheet = tempSs.getSheets()[0];
@@ -185,11 +235,11 @@ function processSingleFile(file, name, targetSheet, lastTargetRowValues) {
       if (!row || !row.length) continue;
 
       if (firstColType === null) {
-        firstColType = getValueType(row[0]);
-        debugLog('First non-empty source row type is ' + firstColType + ' for file ' + name);
+        firstColType = getValueType_(row[0]);
+        logDebug_('First non-empty source row type is ' + firstColType + ' for file ' + name);
       }
 
-      if (lastTargetRowValues && rowsEqual(lastTargetRowValues, row)) {
+      if (lastTargetRowValues && rowsEqual_(lastTargetRowValues, row)) {
         matchIndex = i;
         break;
       }
@@ -206,7 +256,7 @@ function processSingleFile(file, name, targetSheet, lastTargetRowValues) {
       const row = data[i];
       if (!row || !row.length) continue;
 
-      const currentType = getValueType(row[0]);
+      const currentType = getValueType_(row[0]);
       if (firstColType === null) {
         firstColType = currentType;
         rowsToImport.push(row);
@@ -214,8 +264,8 @@ function processSingleFile(file, name, targetSheet, lastTargetRowValues) {
       }
 
       if (currentType !== firstColType) {
-        debugLog('Skipping row ' + (i + 1) + ' from ' + name + ': first column type "' + currentType + '" does not match "' + firstColType + '"');
-        debugLog('Row values: ' + JSON.stringify(row));
+        logDebug_('Skipping row ' + (i + 1) + ' from ' + name + ': first column type "' + currentType + '" does not match "' + firstColType + '"');
+        logDebug_('Row values: ' + JSON.stringify(row));
         continue;
       }
 
@@ -225,33 +275,34 @@ function processSingleFile(file, name, targetSheet, lastTargetRowValues) {
     if (rowsToImport.length) {
       const startRow = targetSheet.getLastRow() + 1 || 1;
       targetSheet.getRange(startRow, 1, rowsToImport.length, rowsToImport[0].length).setValues(rowsToImport);
-      debugLog('Imported ' + rowsToImport.length + ' rows from ' + name);
+      logDebug_('Imported ' + rowsToImport.length + ' rows from ' + name);
     } else {
-      debugLog('No rows to import from ' + name);
+      logDebug_('No rows to import from ' + name);
     }
 
     if (PROCESSED_FOLDER_ID) {
       try {
         // pass null for mediaData so the API treats the 4th arg as optionalArgs
         Drive.Files.update({}, file.getId(), null, { addParents: PROCESSED_FOLDER_ID, removeParents: FOLDER_ID });
-        debugLog('Moved ' + name + ' to processed folder');
+        logDebug_('Moved ' + name + ' to processed folder');
       } catch (e) {
-        logError('Failed to move ' + name + ' to processed folder: ' + (e && e.message ? e.message : e));
+        logError_('Failed to move ' + name + ' to processed folder: ' + (e && e.message ? e.message : e));
       }
     }
+    return rowsToImport.length;
   } finally {
     if (converted && converted.id) {
       try {
         Drive.Files.remove(converted.id);
-        debugLog('Removed temporary converted file for ' + name);
+        logDebug_('Removed temporary converted file for ' + name);
       } catch (e) {
-        logError('Failed to remove temporary converted file for ' + name + ': ' + (e && e.message ? e.message : e));
+        logError_('Failed to remove temporary converted file for ' + name + ': ' + (e && e.message ? e.message : e));
       }
     }
   }
 }
 
-function normalizeValue(value) {
+function normalizeValue_(value) {
   if (value instanceof Date) {
     return value.getTime();
   }
@@ -261,10 +312,10 @@ function normalizeValue(value) {
   return String(value).trim();
 }
 
-function rowsEqual(rowA, rowB) {
+function rowsEqual_(rowA, rowB) {
   const length = Math.max(rowA.length, rowB.length);
   for (let i = 0; i < length; i++) {
-    if (normalizeValue(rowA[i]) !== normalizeValue(rowB[i])) {
+    if (normalizeValue_(rowA[i]) !== normalizeValue_(rowB[i])) {
       return false;
     }
   }
